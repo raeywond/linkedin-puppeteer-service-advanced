@@ -96,7 +96,7 @@ export async function scrapeProfile(browser, { url, login=false }) {
 
   if (login) await ensureLogin(page);
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForTimeout(1200);
+  await sleep(1200);
 
   const html = await page.content();
   if (looksLikeCaptcha(page.url(), html)) return { error: 'captcha_or_challenge', url: page.url() };
@@ -149,7 +149,7 @@ export async function scrapeProfilePosts(browser, { url, days=30, login=false })
     postsUrl = url.replace(/\/?$/, '/') + 'detail/recent-activity/shares/';
   }
   await page.goto(postsUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForTimeout(1200);
+  await sleep(1200);
   await autoScroll(page);
 
   const cutoff = dayjs().subtract(days, 'day');
@@ -182,7 +182,7 @@ export async function scrapeCompany(browser, { url, login=false }) {
   if (login) await ensureLogin(page);
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForTimeout(1000);
+  await sleep(1000);
   const html = await page.content();
   if (looksLikeCaptcha(page.url(), html)) return { error: 'captcha_or_challenge', url: page.url() };
   await autoScroll(page);
@@ -227,7 +227,7 @@ export async function scrapeCompanyPosts(browser, { url, days=30, login=false })
 
   const postsUrl = url.replace(/\/?$/, '/') + 'posts/';
   await page.goto(postsUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForTimeout(1200);
+  await sleep(1200);
   await autoScroll(page);
 
   const cutoff = dayjs().subtract(days, 'day');
@@ -260,7 +260,7 @@ export async function scrapeCompanyJobs(browser, { url, login=false }) {
 
   const jobsUrl = url.replace(/\/?$/, '/') + 'jobs/';
   await page.goto(jobsUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForTimeout(1200);
+ await sleep(1200);
   await autoScroll(page);
 
   const jobs = await page.evaluate(() => {
