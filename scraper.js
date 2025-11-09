@@ -4,6 +4,115 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import dayjs from 'dayjs';
 import fs from 'fs';
 
+// add near other imports
+import fs from 'fs';
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// File fallback (works during a single container lifetime)
+const COOKIES_PATH = process.env.COOKIES_PATH || './cookies.json';
+
+// Upstash Redis (recommended for persistence on free tier)
+const REDIS_URL    = process.env.REDIS_REST_URL;     // e.g. https://eu1-funny-xxxx.upstash.io
+const REDIS_TOKEN  = process.env.REDIS_REST_TOKEN;   // '...'
+const DEFAULT_KEY  = process.env.REDIS_COOKIES_KEY || 'li:cookies';
+
+async function redisGet(key) {
+  if (!REDIS_URL || !REDIS_TOKEN) return null;
+  const res = await fetch(`${REDIS_URL}/GET/${encodeURIComponent(key)}`, {
+    headers: { Authorization: `Bearer ${REDIS_TOKEN}` }
+  });
+  if (!res.ok) return null;
+  const txt = await res.text();
+  return txt === 'null' ? null : txt;
+}
+
+async function redisSet(key, value) {
+  if (!REDIS_URL || !REDIS_TOKEN) return false;
+  const res = await fetch(`${REDIS_URL}/SET/${encodeURIComponent(key)}/${encodeURIComponent(value)}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${REDIS_TOKEN}` }
+  });
+  return res.ok;
+}
+
+async function loadCookies(page, key = DEFAULT_KEY) {
+  // Try Redis first
+  try {
+    const raw = await redisGet(key);
+    if (raw) {
+      const cookies = JSON.parse(raw);
+      if (Array.isArray(cookies) && cookies.length) {
+        await page.setCookie(...cookies);
+        return true;
+      }
+    }
+  } catch {}
+
+  // Fallback to file (non-persistent on free tier)
+  try {
+    if (fs.existsSync(COOKIES_PATH)) {
+      const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf-8'));
+      if (Array.isArray(cookies) && cookies.length) {
+        await page.setCookie(...cookies);
+        return true;
+      }
+    }
+  } catch {}
+
+  return false;
+}
+
+async function saveCookies(page, key = DEFAULT_KEY) {
+  try {
+    const cookies = await page.cookies();
+    const json = JSON.stringify(cookies);
+
+    // Save to Redis
+    if (REDIS_URL && REDIS_TOKEN) {
+      await redisSet(key, json);
+    }
+
+    // Also write local file (harmless fallback)
+    try { fs.writeFileSync(COOKIES_PATH, json); } catch {}
+  } catch {}
+}
+
+// Ensure we’re logged in, but only if necessary
+async function ensureLogin(page, {
+  email = process.env.LINKEDIN_EMAIL,
+  password = process.env.LINKEDIN_PASSWORD,
+  redisKey = DEFAULT_KEY
+} = {}) {
+  await loadCookies(page, redisKey);
+
+  // Hit the feed to check if our cookies already work
+  await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await sleep(800);
+
+  const onLogin = page.url().includes('/login') || await page.$('#username');
+  if (!onLogin) {
+    // Already logged in
+    return;
+  }
+
+  // Need to log in
+  if (!email || !password) {
+    throw new Error('Missing LINKEDIN_EMAIL / LINKEDIN_PASSWORD and no valid cookies');
+  }
+
+  await page.type('#username', email, { delay: 40 });
+  await page.type('#password', password, { delay: 40 });
+  await Promise.all([
+    page.click('button[type=submit]'),
+    page.waitForNavigation({ waitUntil: 'networkidle2' }).catch(()=>{})
+  ]);
+  await sleep(1000);
+
+  await saveCookies(page, redisKey);
+}
+
+
 puppeteer.use(StealthPlugin());
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -94,7 +203,19 @@ export async function scrapeProfile(browser, { url, login=false }) {
   const proxyUser = process.env.PROXY_USERNAME, proxyPass = process.env.PROXY_PASSWORD;
   if (proxyUser && proxyPass) await page.authenticate({ username: proxyUser, password: proxyPass });
 
-  if (login) await ensureLogin(page);
+ if (process.env.USER_AGENT) await page.setUserAgent(process.env.USER_AGENT);
+await page.setExtraHTTPHeaders({ 'accept-language': 'en-US,en;q=0.9' });
+
+// ensureLogin only when requested (login=true)
+if (login) {
+  await ensureLogin(page, {
+    // these fall back to env vars if not provided
+    email: process.env.LINKEDIN_EMAIL,
+    password: process.env.LINKEDIN_PASSWORD,
+    // use a single key or make it configurable per-account later
+    redisKey: process.env.REDIS_COOKIES_KEY || 'li:cookies'
+  });
+}
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await sleep(1200);
 
@@ -142,7 +263,19 @@ export async function scrapeProfile(browser, { url, login=false }) {
 export async function scrapeProfilePosts(browser, { url, days=30, login=false }) {
   const page = await browser.newPage();
   if (process.env.USER_AGENT) await page.setUserAgent(process.env.USER_AGENT);
-  if (login) await ensureLogin(page);
+ if (process.env.USER_AGENT) await page.setUserAgent(process.env.USER_AGENT);
+await page.setExtraHTTPHeaders({ 'accept-language': 'en-US,en;q=0.9' });
+
+// ensureLogin only when requested (login=true)
+if (login) {
+  await ensureLogin(page, {
+    // these fall back to env vars if not provided
+    email: process.env.LINKEDIN_EMAIL,
+    password: process.env.LINKEDIN_PASSWORD,
+    // use a single key or make it configurable per-account later
+    redisKey: process.env.REDIS_COOKIES_KEY || 'li:cookies'
+  });
+}
 
   let postsUrl = url;
   if (!/detail\/recent-activity/i.test(url)) {
@@ -179,7 +312,19 @@ export async function scrapeProfilePosts(browser, { url, days=30, login=false })
 export async function scrapeCompany(browser, { url, login=false }) {
   const page = await browser.newPage();
   if (process.env.USER_AGENT) await page.setUserAgent(process.env.USER_AGENT);
-  if (login) await ensureLogin(page);
+  if (process.env.USER_AGENT) await page.setUserAgent(process.env.USER_AGENT);
+await page.setExtraHTTPHeaders({ 'accept-language': 'en-US,en;q=0.9' });
+
+// ensureLogin only when requested (login=true)
+if (login) {
+  await ensureLogin(page, {
+    // these fall back to env vars if not provided
+    email: process.env.LINKEDIN_EMAIL,
+    password: process.env.LINKEDIN_PASSWORD,
+    // use a single key or make it configurable per-account later
+    redisKey: process.env.REDIS_COOKIES_KEY || 'li:cookies'
+  });
+}
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await sleep(1000);
@@ -223,7 +368,19 @@ export async function scrapeCompany(browser, { url, login=false }) {
 export async function scrapeCompanyPosts(browser, { url, days=30, login=false }) {
   const page = await browser.newPage();
   if (process.env.USER_AGENT) await page.setUserAgent(process.env.USER_AGENT);
-  if (login) await ensureLogin(page);
+  if (process.env.USER_AGENT) await page.setUserAgent(process.env.USER_AGENT);
+await page.setExtraHTTPHeaders({ 'accept-language': 'en-US,en;q=0.9' });
+
+// ensureLogin only when requested (login=true)
+if (login) {
+  await ensureLogin(page, {
+    // these fall back to env vars if not provided
+    email: process.env.LINKEDIN_EMAIL,
+    password: process.env.LINKEDIN_PASSWORD,
+    // use a single key or make it configurable per-account later
+    redisKey: process.env.REDIS_COOKIES_KEY || 'li:cookies'
+  });
+}
 
   const postsUrl = url.replace(/\/?$/, '/') + 'posts/';
   await page.goto(postsUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -256,7 +413,19 @@ export async function scrapeCompanyPosts(browser, { url, days=30, login=false })
 export async function scrapeCompanyJobs(browser, { url, login=false }) {
   const page = await browser.newPage();
   if (process.env.USER_AGENT) await page.setUserAgent(process.env.USER_AGENT);
-  if (login) await ensureLogin(page);
+ if (process.env.USER_AGENT) await page.setUserAgent(process.env.USER_AGENT);
+await page.setExtraHTTPHeaders({ 'accept-language': 'en-US,en;q=0.9' });
+
+// ensureLogin only when requested (login=true)
+if (login) {
+  await ensureLogin(page, {
+    // these fall back to env vars if not provided
+    email: process.env.LINKEDIN_EMAIL,
+    password: process.env.LINKEDIN_PASSWORD,
+    // use a single key or make it configurable per-account later
+    redisKey: process.env.REDIS_COOKIES_KEY || 'li:cookies'
+  });
+}
 
   const jobsUrl = url.replace(/\/?$/, '/') + 'jobs/';
   await page.goto(jobsUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
